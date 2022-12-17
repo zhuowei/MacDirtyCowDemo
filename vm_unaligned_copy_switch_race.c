@@ -1,14 +1,26 @@
-#include <darwintest.h>
-#include <darwintest_utils.h>
+// from https://github.com/apple-oss-distributions/xnu/blob/xnu-8792.61.2/tests/vm/vm_unaligned_copy_switch_race.c
+// modified to compile outside of XNU
+
+#include <pthread.h>
+#include <dispatch/dispatch.h>
+#include <stdio.h>
 
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
 #include <mach/vm_map.h>
 
-T_GLOBAL_META(
-	T_META_NAMESPACE("xnu.vm"),
-	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("VM"));
+#define T_QUIET
+#define T_EXPECT_MACH_SUCCESS(a, b)
+#define T_EXPECT_MACH_ERROR(a, b, c)
+#define T_ASSERT_MACH_SUCCESS(a, b, ...)
+#define T_ASSERT_MACH_ERROR(a, b, c)
+#define T_ASSERT_POSIX_SUCCESS(a, b)
+#define T_ASSERT_EQ(a, b, c) do{if ((a) != (b)) { fprintf(stderr, c "\n"); exit(1); }}while(0)
+#define T_ASSERT_NE(a, b, c)
+#define T_ASSERT_TRUE(a, b, ...)
+#define T_LOG(a, ...) fprintf(stderr, a "\n", __VA_ARGS__)
+#define T_DECL(a, b) static void a(void)
+#define T_PASS(a, ...) fprintf(stderr, a "\n", __VA_ARGS__)
 
 struct context1 {
 	vm_size_t obj_size;
@@ -295,4 +307,8 @@ T_DECL(unaligned_copy_switch_race,
 	T_LOG("vm_read_overwrite: KERN_SUCCESS:%d KERN_PROTECTION_FAILURE:%d other:%d",
 	    kern_success, kern_protection_failure, kern_other);
 	T_PASS("Ran %d times in %ld seconds with no failure", loops, duration);
+}
+
+int main() {
+	unaligned_copy_switch_race();
 }
